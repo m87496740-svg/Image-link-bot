@@ -9,7 +9,9 @@ export default {
       if (!update.message) return new Response("OK");
 
       const chatId = update.message.chat.id;
+      const user = update.message.from;
       const BOT_TOKEN = env.BOT_TOKEN;
+      const LOG_CHANNEL = env.LOG_CHANNEL;
 
       // 1. Handle /start command
       if (update.message.text === "/start") {
@@ -24,7 +26,6 @@ export default {
       // 2. Check if message has a photo or image document
       let fileId = null;
       if (update.message.photo) {
-        // Get highest resolution photo
         fileId = update.message.photo[update.message.photo.length - 1].file_id;
       } else if (
         update.message.document &&
@@ -53,7 +54,7 @@ export default {
       const filePath = fileInfo.result.file_path;
       const tgFileUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`;
 
-      // 4. Download image from Telegram & Upload to Catbox.moe (Permanent Direct Link)
+      // 4. Upload to Catbox.moe for Permanent Direct Link
       const imgRes = await fetch(tgFileUrl);
       const imgBlob = await imgRes.blob();
       const ext = filePath.split(".").pop() || "jpg";
@@ -70,16 +71,37 @@ export default {
       const directLink = (await uploadRes.text()).trim();
 
       if (directLink.startsWith("https://")) {
+        // 5. Send direct link to User
         await sendMessage(
           BOT_TOKEN,
           chatId,
           `✅ **Direct Image Link Ready!**\n\n🔗 **Link:**\n\`${directLink}\`\n\n📋 *(Tap link to copy)*`
         );
+
+        // 6. Send Photo + User Info + Link to Log Channel
+        if (LOG_CHANNEL) {
+          const userName = user.username ? `@${user.username}` : user.first_name || "User";
+          const logCaption =
+            `📸 **New Image Uploaded**\n\n` +
+            `👤 **User:** ${userName} (\`${user.id}\`)\n` +
+            `🔗 **Link:** ${directLink}`;
+
+          await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              chat_id: LOG_CHANNEL,
+              photo: fileId,
+              caption: logCaption,
+              parse_mode: "Markdown",
+            }),
+          });
+        }
       } else {
         await sendMessage(BOT_TOKEN, chatId, `❌ Upload failed: ${directLink}`);
       }
     } catch (err) {
-      // Ignore errors to prevent Telegram webhook retry loops
+      // Prevent Telegram webhook retry loops
     }
 
     return new Response("OK");
