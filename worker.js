@@ -1,5 +1,24 @@
 export default {
   async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+
+    // 1. Custom Domain Image Proxy (e.g. https://img.anime-portal.xyz/uploads/img_123.jpg)
+    if (request.method === "GET" && url.pathname.startsWith("/uploads/")) {
+      const ghRawUrl = `https://raw.githubusercontent.com/m87496740-svg/Image-link-bot/main${url.pathname}`;
+      const imgResponse = await fetch(ghRawUrl, {
+        cf: { cacheEverything: true, cacheTtl: 31536000 }, // 1-Year Edge Cache for ultra-fast website loading
+      });
+
+      if (!imgResponse.ok) {
+        return new Response("Image Not Found", { status: 404 });
+      }
+
+      const headers = new Headers(imgResponse.headers);
+      headers.set("Cache-Control", "public, max-age=31536000, immutable");
+      headers.set("Access-Control-Allow-Origin", "*");
+      return new Response(imgResponse.body, { status: 200, headers });
+    }
+
     if (request.method !== "POST") {
       return new Response("Image Link Generator Bot is Live 24/7!", { status: 200 });
     }
@@ -14,46 +33,63 @@ export default {
       const BOT_TOKEN = env.BOT_TOKEN;
       const LOG_CHANNEL = env.LOG_CHANNEL;
       const GITHUB_TOKEN = env.GITHUB_TOKEN;
+      const ADMIN_ID = env.ADMIN_ID ? String(env.ADMIN_ID).trim() : null;
+      const CUSTOM_DOMAIN = env.CUSTOM_DOMAIN ? String(env.CUSTOM_DOMAIN).trim().replace(/\/$/, "") : null;
 
-      // 1. Commands (/start, /help, /ping)
+      // 2. Strict Admin Lock Check
+      if (ADMIN_ID && String(user.id) !== ADMIN_ID) {
+        await sendMessage(
+          BOT_TOKEN,
+          chatId,
+          `⛔ <b>Access Denied!</b>\n\nThis is a private bot.\n🆔 <b>Your ID:</b> <code>${user.id}</code>`
+        );
+        return new Response("OK");
+      }
+
+      // 3. Commands (/start, /help, /ping, /id)
       if (text === "/start" || text === "/help") {
         await sendMessage(
           BOT_TOKEN,
           chatId,
-          "👋 <b>Welcome to Image Direct Link Bot!</b>\n\n" +
-            "Send me any <b>Photo</b> or <b>Image File</b> (JPG, PNG, WEBP), and I will generate a <b>Permanent Direct Link</b>.\n\n" +
-            "⚡ <b>Speed:</b> Ultra-Fast Edge\n" +
-            "🔒 <b>Storage:</b> Permanent Cloud\n" +
-            "🌐 <b>Uptime:</b> 24/7 Online\n\n" +
-            "📌 <i>Commands: /start • /ping</i>"
+          "👋 <b>Welcome Admin! Image Direct Link Bot Ready</b>\n\n" +
+            "📌 <b>For Website HD Quality:</b>\n" +
+            "• <b>Normal Photo:</b> Fast 1280px Web HD\n" +
+            "• <b>Max 4K Quality:</b> Tap <code>📎 → File</code> or <i>Send without compression</i>\n\n" +
+            `🌐 <b>Domain:</b> <code>${CUSTOM_DOMAIN || "raw.githubusercontent.com"}</code>\n` +
+            "🔒 <b>Mode:</b> Admin Locked • 24/7 Edge"
         );
         return new Response("OK");
       }
 
       if (text === "/ping") {
         const start = Date.now();
-        await sendMessage(BOT_TOKEN, chatId, `🏓 <b>Pong!</b> Bot is active 24/7 (${Date.now() - start}ms)`);
+        await sendMessage(BOT_TOKEN, chatId, `🏓 <b>Pong!</b> Active 24/7 (${Date.now() - start}ms)`);
         return new Response("OK");
       }
 
-      // 2. Get highest-res photo or image document
+      if (text === "/id") {
+        await sendMessage(BOT_TOKEN, chatId, `🆔 <b>Your Telegram ID:</b> <code>${user.id}</code>`);
+        return new Response("OK");
+      }
+
+      // 4. Extract Highest-Res Photo or Uncompressed Image Document
       let fileId = null;
-      if (update.message.photo) {
-        fileId = update.message.photo[update.message.photo.length - 1].file_id;
-      } else if (
-        update.message.document &&
-        update.message.document.mime_type &&
-        update.message.document.mime_type.startsWith("image/")
-      ) {
+      let qualityBadge = "Web HD (1280px)";
+
+      if (update.message.document && update.message.document.mime_type?.startsWith("image/")) {
         fileId = update.message.document.file_id;
+        qualityBadge = "Original Lossless HD";
+      } else if (update.message.photo) {
+        // Always pick the largest resolution array item
+        fileId = update.message.photo[update.message.photo.length - 1].file_id;
+        qualityBadge = "Standard Web HD";
       }
 
       if (!fileId) {
-        await sendMessage(BOT_TOKEN, chatId, "⚠️ Please send a valid <b>Photo</b> or <b>Image file</b>.");
+        await sendMessage(BOT_TOKEN, chatId, "⚠️ Please send a valid <b>Photo</b> or <b>Image File</b>.");
         return new Response("OK");
       }
 
-      // Non-blocking typing/upload indicator
       ctx.waitUntil(
         fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendChatAction`, {
           method: "POST",
@@ -62,12 +98,12 @@ export default {
         })
       );
 
-      // 3. Fetch Telegram file path & download binary in parallel-ready flow
+      // 5. Download File from Telegram
       const fileInfoRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`);
       const fileInfo = await fileInfoRes.json();
 
       if (!fileInfo.ok) {
-        await sendMessage(BOT_TOKEN, chatId, "❌ Could not fetch image from Telegram. Try again.");
+        await sendMessage(BOT_TOKEN, chatId, "❌ Failed to fetch image from Telegram.");
         return new Response("OK");
       }
 
@@ -76,13 +112,21 @@ export default {
       const arrayBuffer = await imgRes.arrayBuffer();
       const base64Content = arrayBufferToBase64(arrayBuffer);
 
-      // 4. Upload to GitHub repository
+      // 6. Custom Slug from Caption (optional) or Timestamp Filename
       const ext = filePath.split(".").pop() || "jpg";
-      const fileName = `img_${Date.now()}.${ext}`;
+      const rawCaption = (update.message.caption || "").trim();
+      const cleanSlug = rawCaption
+        .toLowerCase()
+        .replace(/[^a-z0-9-_]/g, "-")
+        .replace(/-+/g, "-")
+        .replace(/^-|-$/g, "");
+
+      const fileName = cleanSlug ? `${cleanSlug}_${Date.now().toString().slice(-5)}.${ext}` : `img_${Date.now()}.${ext}`;
       const repoOwner = "m87496740-svg";
       const repoName = "Image-link-bot";
       const uploadPath = `uploads/${fileName}`;
 
+      // 7. Upload to GitHub
       const ghRes = await fetch(
         `https://api.github.com/repos/${repoOwner}/${repoName}/contents/${uploadPath}`,
         {
@@ -102,32 +146,35 @@ export default {
       const ghData = await ghRes.json();
 
       if (ghRes.ok && ghData.content) {
-        const directLink = `https://raw.githubusercontent.com/${repoOwner}/${repoName}/main/${uploadPath}`;
+        const directLink = CUSTOM_DOMAIN
+          ? `${CUSTOM_DOMAIN}/${uploadPath}`
+          : `https://raw.githubusercontent.com/${repoOwner}/${repoName}/main/${uploadPath}`;
 
-        // 5. Instant Reply with Open Image Button & Tap-to-Copy URL
         await sendMessage(
           BOT_TOKEN,
           chatId,
-          `✅ <b>Direct Image Link Ready!</b>\n\n` +
-            `🔗 <b>Direct URL:</b>\n<code>${directLink}</code>\n\n` +
-            `📋 <i>Tap the link above to copy</i>`,
+          `✅ <b>Direct Image Link Ready!</b>\n` +
+            `✨ <b>Quality:</b> ${qualityBadge}\n\n` +
+            `🔗 <b>URL:</b>\n<code>${directLink}</code>\n\n` +
+            `📋 <i>Tap the link to copy</i>`,
           {
             inline_keyboard: [[{ text: "🌐 Open Image", url: directLink }]],
           }
         );
 
-        // 6. Background Log Channel task (Zero speed delay to user!)
+        // 8. Non-Blocking Background Log
         if (LOG_CHANNEL) {
           ctx.waitUntil(
             (async () => {
-              const safeName = escapeHtml(user.first_name || "User");
+              const safeName = escapeHtml(user.first_name || "Admin");
               const userTag = user.username ? `@${escapeHtml(user.username)}` : safeName;
               const logCaption =
                 `📸 <b>New Image Uploaded</b>\n\n` +
-                `👤 <b>User:</b> ${userTag} (<code>${user.id}</code>)\n` +
+                `👤 <b>Admin:</b> ${userTag} (<code>${user.id}</code>)\n` +
+                `✨ <b>Quality:</b> ${qualityBadge}\n` +
                 `🔗 <b>Link:</b> ${directLink}`;
 
-              const logRes = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+              await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -137,15 +184,6 @@ export default {
                   parse_mode: "HTML",
                 }),
               });
-
-              const logData = await logRes.json();
-              if (!logData.ok) {
-                await sendMessage(
-                  BOT_TOKEN,
-                  chatId,
-                  `⚠️ <b>Log Channel Failed:</b> <code>${escapeHtml(logData.description)}</code>`
-                );
-              }
             })()
           );
         }
@@ -153,7 +191,7 @@ export default {
         await sendMessage(BOT_TOKEN, chatId, `❌ Upload failed: ${escapeHtml(ghData.message || "Unknown error")}`);
       }
     } catch (err) {
-      // Prevent Telegram webhook retries
+      // Ignore errors
     }
 
     return new Response("OK");
